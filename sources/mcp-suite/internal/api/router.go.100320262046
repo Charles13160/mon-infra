@@ -1,0 +1,102 @@
+package api
+
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"go.uber.org/zap"
+
+	"github.com/felfoldy/mcp-suite/internal/api/handlers"
+	"github.com/felfoldy/mcp-suite/internal/api/middleware"
+	"github.com/felfoldy/mcp-suite/internal/config"
+	"github.com/felfoldy/mcp-suite/internal/jwt"
+	"github.com/felfoldy/mcp-suite/internal/pki"
+	"github.com/felfoldy/mcp-suite/internal/webhook"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type Router struct {
+	chi.Router
+}
+
+func NewRouter(
+	cfg *config.Config,
+	db *pgxpool.Pool,
+	jwtMgr *jwt.Manager,
+	ca *pki.CA,
+	pusher *webhook.Pusher,
+	log *zap.Logger,
+	version string,
+) http.Handler {
+	r := chi.NewRouter()
+
+	// Middlewares globaux
+	r.Use(chimiddleware.RealIP)
+	r.Use(chimiddleware.Recoverer)
+	r.Use(middleware.RequestID)
+	r.Use(chimiddleware.RequestLogger(&chimiddleware.DefaultLogFormatter{
+		Logger: &zapAdapter{log},
+	}))
+
+	// Handlers
+	licHandler  := handlers.NewLicenseHandler(db, jwtMgr, pusher, log)
+	hostHandler := handlers.NewHostHandler(db, ca, cfg.PKI.CertTTLDays, jwtMgr.ActivePublicPEM(), log)
+	tokenHandler := handlers.NewTokenHandler(db, log)
+	pkiHandler  := handlers.NewPKIHandler(db, jwtMgr, version)
+
+	adminAuth := middleware.AdminAuth(cfg.JWT.AdminSecret, log)
+
+	r.Route("/v1", func(r chi.Router) {
+
+		// ── Routes publiques ──────────────────────────────
+		r.Get("/health", pkiHandler.Health)
+		r.Get("/pki/public-key", pkiHandler.PublicKey)
+
+		// ── Routes admin (JWT HMAC-SHA256) ───────────────
+		r.Group(func(r chi.Router) {
+			r.Use(adminAuth)
+
+			// Licences
+			r.Post("/licenses", licHandler.Create)
+			r.Get("/licenses/{key}", licHandler.Get)
+			r.Post("/licenses/{key}/revoke", licHandler.Revoke)
+			r.Post("/licenses/{key}/renew", licHandler.Renew)
+
+			// Hosts
+			r.Delete("/hosts/{host_id}", hostHandler.Revoke)
+
+			// Tokens usage (rapport)
+			r.Get("/tokens/usage/{key}", tokenHandler.Usage)
+		})
+
+		// ── Routes Master JWT (validation licence) ───────
+		// Note: en prod, ajouter middleware ValidateMasterJWT
+		r.Group(func(r chi.Router) {
+			r.Use(adminAuth) // réutilise admin pour l'instant — remplacer par MasterJWT en Chat 4
+			r.Get("/licenses/{key}/status", licHandler.Status)
+			r.Post("/tokens/consume", tokenHandler.Consume)
+		})
+
+		// ── Routes Worker (X-License-Key) ─────────────────
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.LicenseKeyAuth)
+			r.Post("/hosts/register", hostHandler.Register)
+		})
+
+		// ── Routes mTLS Worker (renouvellement cert) ──────
+		r.Get("/hosts/{host_id}/cert", hostHandler.RenewCert)
+		r.Post("/hosts/{host_id}/heartbeat", hostHandler.Heartbeat)
+	})
+
+	return r
+}
+
+// zapAdapter adapte zap.Logger à l'interface chi LogFormatter
+type zapAdapter struct {
+	log *zap.Logger
+}
+
+func (z *zapAdapter) Print(v ...interface{}) {
+	z.log.Sugar().Info(v...)
+}

@@ -1,0 +1,10 @@
+{
+  "error": true,
+  "url": "http://baserow.io/media/user_files/mon_fichier.pdf",
+  "statusCode": 404,
+  "statusMessage": "Page not found: /media/user_files/mon_fichier.pdf",
+  "message": "Page not found: /media/user_files/mon_fichier.pdf",
+  "data": {
+    "path": "/media/user_files/mon_fichier.pdf"
+  }
+}

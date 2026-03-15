@@ -1,0 +1,65 @@
+[Unit]
+Description=MCP License Server — felfoldy.fr
+Documentation=https://felfoldy.fr/mcp
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=mcp-suite
+Group=mcp-suite
+WorkingDirectory=/srv/mcp-suite
+
+# Variables sensibles — fichier protégé chmod 600
+EnvironmentFile=/srv/mcp-suite/config/.env
+
+# Binaire compilé statiquement
+ExecStart=/srv/mcp-suite/bin/license-server
+
+# Redémarrage automatique sauf arrêt manuel
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Stdout/stderr → journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-license-server
+
+# ── Hardening systemd ──────────────────────────
+# Pas de nouveaux privilèges
+NoNewPrivileges=true
+
+# Filesystem en lecture seule sauf /srv/mcp-suite et /tmp
+ProtectSystem=strict
+ReadWritePaths=/srv/mcp-suite/certs /srv/mcp-suite/logs
+
+# Pas d'accès /home des autres utilisateurs
+ProtectHome=true
+
+# Namespace privé pour /tmp
+PrivateTmp=true
+
+# Pas d'accès aux devices
+PrivateDevices=true
+
+# Système de fichiers kernel en lecture seule
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Filtrage appels système (whitelist)
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Limites ressources
+LimitNOFILE=65536
+LimitNPROC=512
+
+# Timeout arrêt gracieux
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

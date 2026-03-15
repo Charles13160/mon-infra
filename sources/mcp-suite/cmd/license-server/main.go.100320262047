@@ -1,0 +1,151 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/felfoldy/mcp-suite/internal/api"
+	"github.com/felfoldy/mcp-suite/internal/config"
+	"github.com/felfoldy/mcp-suite/internal/db"
+	"github.com/felfoldy/mcp-suite/internal/jwt"
+	"github.com/felfoldy/mcp-suite/internal/pki"
+	"github.com/felfoldy/mcp-suite/internal/webhook"
+)
+
+// Injectés à la compilation via -ldflags
+var (
+	version   = "dev"
+	buildHash = "unknown"
+)
+
+func main() {
+	// ── Logger ─────────────────────────────────────────────
+	logLevel := zapcore.InfoLevel
+	if os.Getenv("MCP_LOG_LEVEL") == "debug" {
+		logLevel = zapcore.DebugLevel
+	}
+	logCfg := zap.NewProductionConfig()
+	logCfg.Level = zap.NewAtomicLevelAt(logLevel)
+	log, err := logCfg.Build()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "erreur initialisation logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer log.Sync()
+
+	log.Info("MCP License Server démarrage",
+		zap.String("version", version),
+		zap.String("build", buildHash),
+	)
+
+	// ── Configuration ──────────────────────────────────────
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal("chargement config", zap.Error(err))
+	}
+
+	// ── PostgreSQL ─────────────────────────────────────────
+	ctx := context.Background()
+	pool, err := db.New(ctx, cfg.Database, log)
+	if err != nil {
+		log.Fatal("connexion PostgreSQL", zap.Error(err))
+	}
+	defer pool.Close()
+
+	// ── PKI — init CA si nécessaire ────────────────────────
+	caDir := filepath.Dir(cfg.PKI.CACertPath)
+	if err := os.MkdirAll(caDir, 0700); err != nil {
+		log.Fatal("création répertoire PKI", zap.Error(err))
+	}
+	if err := pki.InitCA(cfg.PKI.CACertPath, cfg.PKI.CAKeyPath); err != nil {
+		log.Fatal("initialisation CA", zap.Error(err))
+	}
+	ca, err := pki.LoadCA(cfg.PKI.CACertPath, cfg.PKI.CAKeyPath)
+	if err != nil {
+		log.Fatal("chargement CA", zap.Error(err))
+	}
+	log.Info("PKI CA chargée")
+
+	// ── JWT RS256 Manager ──────────────────────────────────
+	jwtMgr, err := jwt.NewManager(cfg.JWT.KeysDir)
+	if err != nil {
+		log.Fatal("initialisation JWT manager", zap.Error(err))
+	}
+	log.Info("JWT RS256 actif", zap.String("kid", jwtMgr.ActiveKID()))
+
+	// ── Webhook Pusher ─────────────────────────────────────
+	pusher := webhook.NewPusher(cfg.Webhook.TimeoutSec, cfg.Webhook.MaxRetries, log)
+
+	// ── Router ─────────────────────────────────────────────
+	handler := api.NewRouter(cfg, pool, jwtMgr, ca, pusher, log, version)
+
+	// ── Cron : expiration des licences (toutes les minutes) ─
+	go runExpirationCron(ctx, pool, log)
+
+	// ── Serveur HTTP ───────────────────────────────────────
+	srv := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Démarrage en goroutine
+	go func() {
+		log.Info("License Server en écoute", zap.Int("port", cfg.Server.Port))
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("erreur serveur HTTP", zap.Error(err))
+		}
+	}()
+
+	// ── Graceful shutdown ──────────────────────────────────
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	<-quit
+
+	log.Info("Arrêt gracieux en cours...")
+	ctxShutdown, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctxShutdown); err != nil {
+		log.Error("erreur shutdown", zap.Error(err))
+	}
+	log.Info("License Server arrêté proprement")
+}
+
+// runExpirationCron expire les licences dépassées toutes les minutes
+func runExpirationCron(ctx context.Context, pool interface{ Exec(context.Context, string, ...interface{}) (interface{ RowsAffected() int64 }, error) }, log *zap.Logger) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			expireLicenses(ctx, pool, log)
+		}
+	}
+}
+
+func expireLicenses(ctx context.Context, pool interface{ Exec(context.Context, string, ...interface{}) (interface{ RowsAffected() int64 }, error) }, log *zap.Logger) {
+	res, err := pool.Exec(ctx, `
+		UPDATE licenses SET status='expired', updated_at=NOW()
+		WHERE status='active' AND expiry_at IS NOT NULL AND expiry_at < NOW()`)
+	if err != nil {
+		log.Error("cron expiration licences", zap.Error(err))
+		return
+	}
+	if n := res.RowsAffected(); n > 0 {
+		log.Info("licences expirées", zap.Int64("count", n))
+	}
+}

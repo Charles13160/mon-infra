@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# /srv/mcp-suite/mcp — Commande de contrôle MCP Suite
+# Usage: mcp <commande> [service] [options]
+# Lien symbolique recommandé : ln -sf /srv/mcp-suite/mcp /usr/local/bin/mcp
+
+set -euo pipefail
+
+MCP_DIR="/srv/mcp-suite"
+SERVICES=("license-server" "worker" "master")
+VERSION_FILE="$MCP_DIR/bin/.version"
+
+# ── Couleurs ────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok()   { echo -e "${GREEN}✓${NC} $*"; }
+warn() { echo -e "${YELLOW}⚠${NC}  $*"; }
+err()  { echo -e "${RED}✗${NC} $*" >&2; }
+info() { echo -e "${BLUE}→${NC} $*"; }
+
+# ── Helpers ─────────────────────────────────────────────────
+service_name() {
+    echo "mcp-${1}.service"
+}
+
+is_valid_service() {
+    local svc="$1"
+    for s in "${SERVICES[@]}"; do
+        [[ "$s" == "$svc" ]] && return 0
+    done
+    return 1
+}
+
+require_root() {
+    [[ $EUID -eq 0 ]] || { err "Cette commande nécessite les droits root (sudo mcp $*)"; exit 1; }
+}
+
+# ── Commandes ────────────────────────────────────────────────
+
+cmd_start() {
+    local svc="${1:-}"
+    require_root start "$@"
+    if [[ -z "$svc" ]]; then
+        info "Démarrage de tous les services MCP..."
+        for s in "${SERVICES[@]}"; do
+            systemctl start "$(service_name "$s")" && ok "$s démarré" || warn "$s non disponible"
+        done
+    else
+        is_valid_service "$svc" || { err "Service inconnu: $svc. Valides: ${SERVICES[*]}"; exit 1; }
+        systemctl start "$(service_name "$svc")"
+        ok "$svc démarré"
+    fi
+}
+
+cmd_stop() {
+    local svc="${1:-}"
+    require_root stop "$@"
+    if [[ -z "$svc" ]]; then
+        info "Arrêt de tous les services MCP..."
+        for s in "${SERVICES[@]}"; do
+            systemctl stop "$(service_name "$s")" 2>/dev/null && ok "$s arrêté" || true
+        done
+    else
+        is_valid_service "$svc" || { err "Service inconnu: $svc"; exit 1; }
+        systemctl stop "$(service_name "$svc")"
+        ok "$svc arrêté"
+    fi
+}
+
+cmd_restart() {
+    local svc="${1:-}"
+    require_root restart "$@"
+    if [[ -z "$svc" ]]; then
+        for s in "${SERVICES[@]}"; do
+            systemctl restart "$(service_name "$s")" 2>/dev/null && ok "$s redémarré" || true
+        done
+    else
+        is_valid_service "$svc" || { err "Service inconnu: $svc"; exit 1; }
+        systemctl restart "$(service_name "$svc")"
+        ok "$svc redémarré"
+    fi
+}
+
+cmd_status() {
+    local svc="${1:-}"
+    echo ""
+    echo -e "${BOLD}═══ MCP Suite Status ══════════════════════════════${NC}"
+
+    if [[ -z "$svc" ]]; then
+        for s in "${SERVICES[@]}"; do
+            local unit
+            unit="$(service_name "$s")"
+            local state
+            state=$(systemctl is-active "$unit" 2>/dev/null || echo "inactive")
+            if [[ "$state" == "active" ]]; then
+                local pid uptime
+                pid=$(systemctl show "$unit" -p MainPID --value 2>/dev/null || echo "?")
+                uptime=$(systemctl show "$unit" -p ActiveEnterTimestamp --value 2>/dev/null | cut -d' ' -f1-3)
+                echo -e "  ${GREEN}●${NC} ${BOLD}$s${NC} — actif (PID: $pid, depuis: $uptime)"
+            elif [[ "$state" == "inactive" ]]; then
+                echo -e "  ${YELLOW}○${NC} ${BOLD}$s${NC} — inactif"
+            else
+                echo -e "  ${RED}✗${NC} ${BOLD}$s${NC} — $state"
+            fi
+        done
+    else
+        is_valid_service "$svc" || { err "Service inconnu: $svc"; exit 1; }
+        systemctl status "$(service_name "$svc")" --no-pager -l
+        return
+    fi
+
+    # Infos DB
+    echo ""
+    echo -e "${BOLD}  Base de données${NC}"
+    if pg_isready -h localhost -U license_server -d license -q 2>/dev/null; then
+        ok "  PostgreSQL (license) — connecté"
+    else
+        warn "  PostgreSQL — non accessible depuis cet utilisateur"
+    fi
+    echo ""
+    cmd_version
+}
+
+cmd_logs() {
+    local svc="${1:-license-server}"
+    local lines="${2:-50}"
+    is_valid_service "$svc" || { err "Service inconnu: $svc"; exit 1; }
+    info "Logs $svc (dernières $lines lignes, Ctrl+C pour quitter)..."
+    journalctl -u "$(service_name "$svc")" -n "$lines" -f
+}
+
+cmd_version() {
+    echo -e "${BOLD}  Versions${NC}"
+    for s in "${SERVICES[@]}"; do
+        local bin="$MCP_DIR/bin/$s"
+        if [[ -x "$bin" ]]; then
+            local v
+            v=$("$bin" --version 2>/dev/null || echo "?")
+            echo -e "  ${BLUE}$s${NC}: $v"
+        else
+            echo -e "  ${YELLOW}$s${NC}: non installé"
+        fi
+    done
+}
+
+cmd_update() {
+    require_root update "$@"
+    local target="${1:-all}"
+    info "Mise à jour MCP Suite..."
+
+    # Arrêt gracieux
+    cmd_stop
+
+    # Backup des binaires actuels
+    local backup_dir="$MCP_DIR/bin/.backup-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+    for s in "${SERVICES[@]}"; do
+        [[ -f "$MCP_DIR/bin/$s" ]] && cp "$MCP_DIR/bin/$s" "$backup_dir/" && ok "Backup $s"
+    done
+
+    # Téléchargement depuis le registry privé (à adapter selon l'infra)
+    info "Téléchargement depuis registry.felfoldy.fr..."
+    # docker pull registry.felfoldy.fr/mcp-suite:latest
+    # docker create --name mcp-extract registry.felfoldy.fr/mcp-suite:latest
+    # docker cp mcp-extract:/usr/local/bin/. $MCP_DIR/bin/
+    # docker rm mcp-extract
+    warn "Implémentation update à finaliser selon le registry (Chat 3)"
+
+    # Redémarrage
+    cmd_start
+    ok "Mise à jour terminée"
+}
+
+cmd_enable() {
+    require_root enable "$@"
+    local svc="${1:-}"
+    if [[ -z "$svc" ]]; then
+        for s in "${SERVICES[@]}"; do
+            systemctl enable "$(service_name "$s")" 2>/dev/null && ok "$s activé au démarrage" || true
+        done
+    else
+        is_valid_service "$svc" || { err "Service inconnu: $svc"; exit 1; }
+        systemctl enable "$(service_name "$svc")"
+        ok "$svc activé au démarrage"
+    fi
+}
+
+cmd_install() {
+    require_root install
+    info "Installation MCP Suite sur ce système..."
+
+    # Créer utilisateur système
+    if ! id -u mcp-suite &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin mcp-suite
+        ok "Utilisateur mcp-suite créé"
+    fi
+
+    # Créer arborescence
+    mkdir -p "$MCP_DIR"/{bin,config,certs/{ca,jwt},logs}
+    chown -R mcp-suite:mcp-suite "$MCP_DIR"
+    chmod 750 "$MCP_DIR"
+    chmod 700 "$MCP_DIR/certs"
+    ok "Arborescence /srv/mcp-suite créée"
+
+    # Installer services systemd
+    for svc in "$MCP_DIR"/systemd/*.service; do
+        cp "$svc" /etc/systemd/system/
+        ok "Service $(basename $svc) installé"
+    done
+    systemctl daemon-reload
+    ok "systemd rechargé"
+
+    # Template .env
+    if [[ ! -f "$MCP_DIR/config/.env" ]]; then
+        cp "$MCP_DIR/config/.env.template" "$MCP_DIR/config/.env"
+        chmod 600 "$MCP_DIR/config/.env"
+        chown mcp-suite:mcp-suite "$MCP_DIR/config/.env"
+        warn "Éditer $MCP_DIR/config/.env avant de démarrer"
+    fi
+
+    info "Installation terminée. Étapes suivantes :"
+    echo "  1. Éditer /srv/mcp-suite/config/.env"
+    echo "  2. Copier les binaires dans /srv/mcp-suite/bin/"
+    echo "  3. sudo mcp enable"
+    echo "  4. sudo mcp start license-server"
+}
+
+# ── Usage ────────────────────────────────────────────────────
+
+usage() {
+    echo ""
+    echo -e "${BOLD}mcp${NC} — Commande de contrôle MCP Suite (felfoldy.fr)"
+    echo ""
+    echo -e "${BOLD}USAGE${NC}"
+    echo "  mcp <commande> [service] [options]"
+    echo ""
+    echo -e "${BOLD}SERVICES${NC}"
+    echo "  license-server    License Server (host2)"
+    echo "  worker            MCP Worker (hosts clients)"
+    echo "  master            MCP Master (host2)"
+    echo ""
+    echo -e "${BOLD}COMMANDES${NC}"
+    echo "  start   [service]   Démarrer un service (ou tous)"
+    echo "  stop    [service]   Arrêter un service (ou tous)"
+    echo "  restart [service]   Redémarrer un service (ou tous)"
+    echo "  status  [service]   État des services"
+    echo "  logs    <service>   Suivre les logs en temps réel"
+    echo "  version             Versions des binaires installés"
+    echo "  enable  [service]   Activer au démarrage système"
+    echo "  install             Installer MCP Suite sur ce système"
+    echo "  update  [service]   Mettre à jour les binaires"
+    echo ""
+    echo -e "${BOLD}EXEMPLES${NC}"
+    echo "  sudo mcp start"
+    echo "  sudo mcp restart license-server"
+    echo "  mcp status"
+    echo "  mcp logs worker"
+    echo ""
+}
+
+# ── Dispatch ─────────────────────────────────────────────────
+
+CMD="${1:-}"
+shift || true
+
+case "$CMD" in
+    start)    cmd_start "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    restart)  cmd_restart "$@" ;;
+    status)   cmd_status "$@" ;;
+    logs)     cmd_logs "$@" ;;
+    version)  cmd_version ;;
+    update)   cmd_update "$@" ;;
+    enable)   cmd_enable "$@" ;;
+    install)  cmd_install ;;
+    help|--help|-h|"") usage ;;
+    *)
+        err "Commande inconnue: $CMD"
+        usage
+        exit 1
+        ;;
+esac
