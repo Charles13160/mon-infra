@@ -1,0 +1,6 @@
+Binary: mcp-worker
+Version: 20260315-1606
+Architecture: x86_64
+Date: Sun Mar 15 16:06:34 CET 2026
+Size: 5.9M
+SHA256: 721308209c4e73098b41b1905f9221bafaeee859df8960cc842d304479d6b88a
