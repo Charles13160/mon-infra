@@ -16,6 +16,7 @@ type Config struct {
 	Webhook  WebhookConfig
 	Log      LogConfig
 	Baserow  BaserowConfig
+	Master   MasterConfig
 }
 
 type ServerConfig struct {
@@ -53,10 +54,17 @@ type LogConfig struct {
 }
 
 type BaserowConfig struct {
-	URL               string `mapstructure:"url"`
-	Token             string `mapstructure:"token"`
-	LicensesTableID   int    `mapstructure:"licenses_table_id"`
-	CustomersTableID  int    `mapstructure:"customers_table_id"`
+	URL              string `mapstructure:"url"`
+	Token            string `mapstructure:"token"`
+	LicensesTableID  int    `mapstructure:"licenses_table_id"`
+	CustomersTableID int    `mapstructure:"customers_table_id"`
+}
+
+// MasterConfig contient les informations pour notifier le mcp-master
+// lors d'une révocation ou d'un changement de statut de licence
+type MasterConfig struct {
+	WebhookURL    string `mapstructure:"webhook_url"`    // ex: http://100.64.0.3:8082/webhook/revoke
+	WebhookSecret string `mapstructure:"webhook_secret"` // WEBHOOK_SECRET du mcp-master
 }
 
 func Load() (*Config, error) {
@@ -88,12 +96,12 @@ func Load() (*Config, error) {
 	v.AddConfigPath(".")
 	v.ReadInConfig() // silencieux si absent
 
-	// Variables d'environnement — binding explicite
+	// Variables d'environnement
 	v.SetEnvPrefix("MCP")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
-	// Bindings explicites pour les variables critiques
+	// Bindings explicites
 	v.BindEnv("database.url", "MCP_DATABASE_URL")
 	v.BindEnv("jwt.admin_secret", "MCP_JWT_ADMIN_SECRET")
 	v.BindEnv("server.port", "MCP_SERVER_PORT")
@@ -102,13 +110,16 @@ func Load() (*Config, error) {
 	v.BindEnv("baserow.token", "BASEROW_TOKEN")
 	v.BindEnv("baserow.licenses_table_id", "BASEROW_LICENSES_TABLE_ID")
 	v.BindEnv("baserow.customers_table_id", "BASEROW_CUSTOMERS_TABLE_ID")
+	// mcp-master webhook — invalidation cache immédiate
+	v.BindEnv("master.webhook_url", "MASTER_WEBHOOK_URL")
+	v.BindEnv("master.webhook_secret", "MASTER_WEBHOOK_SECRET")
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("erreur parsing config: %w", err)
 	}
 
-	// Fallback direct os.Getenv si Viper rate encore
+	// Fallbacks directs
 	if cfg.Database.URL == "" {
 		cfg.Database.URL = os.Getenv("MCP_DATABASE_URL")
 	}
@@ -120,6 +131,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.Baserow.Token == "" {
 		cfg.Baserow.Token = os.Getenv("BASEROW_TOKEN")
+	}
+	if cfg.Master.WebhookURL == "" {
+		cfg.Master.WebhookURL = os.Getenv("MASTER_WEBHOOK_URL")
+	}
+	if cfg.Master.WebhookSecret == "" {
+		cfg.Master.WebhookSecret = os.Getenv("MASTER_WEBHOOK_SECRET")
 	}
 
 	if cfg.Database.URL == "" {

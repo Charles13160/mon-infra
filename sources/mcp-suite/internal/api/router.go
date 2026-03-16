@@ -46,6 +46,9 @@ func NewRouter(
 		log,
 	)
 
+	// Configurer l'invalidation cache du mcp-master via variables d'env
+	syncHandler.SetMasterWebhook(cfg.Master.WebhookURL, cfg.Master.WebhookSecret)
+
 	adminAuth := middleware.AdminAuth(cfg.JWT.AdminSecret, log)
 
 	r.Route("/v1", func(r chi.Router) {
@@ -81,8 +84,8 @@ func NewRouter(
 
 		r.Get("/hosts/{host_id}/cert", hostHandler.RenewCert)
 		r.Post("/hosts/{host_id}/heartbeat", hostHandler.Heartbeat)
-		
-		// Webhook Baserow (public, pas d'auth pour le moment - TODO: ajouter validation signature)
+
+		// Webhook Baserow — invalidation immédiate du cache mcp-master
 		r.Post("/sync/baserow/webhook", syncHandler.WebhookFromBaserow)
 	})
 
