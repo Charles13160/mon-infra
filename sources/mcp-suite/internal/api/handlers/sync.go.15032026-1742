@@ -1,0 +1,279 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/felfoldy/mcp-suite/internal/baserow"
+	"github.com/felfoldy/mcp-suite/internal/tokens"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
+)
+
+type SyncHandler struct {
+	db             *pgxpool.Pool
+	log            *zap.Logger
+	baserowClient  *baserow.Client
+	tokenSecret    string
+	licensesTableID int
+	customersTableID int
+}
+
+func NewSyncHandler(db *pgxpool.Pool, baserowURL, baserowToken, tokenSecret string, licensesTableID, customersTableID int, log *zap.Logger) *SyncHandler {
+	return &SyncHandler{
+		db:              db,
+		log:             log,
+		baserowClient:   baserow.NewClient(baserowURL, baserowToken),
+		tokenSecret:     tokenSecret,
+		licensesTableID: licensesTableID,
+		customersTableID: customersTableID,
+	}
+}
+
+type SyncResponse struct {
+	Success          bool     `json:"success"`
+	CustomersAdded   int      `json:"customers_added"`
+	CustomersUpdated int      `json:"customers_updated"`
+	LicensesAdded    int      `json:"licenses_added"`
+	LicensesUpdated  int      `json:"licenses_updated"`
+	Errors           []string `json:"errors,omitempty"`
+	Duration         string   `json:"duration"`
+}
+
+// SyncFromBaserow - endpoint POST /v1/sync/baserow
+func (h *SyncHandler) SyncFromBaserow(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	ctx := r.Context()
+	
+	response := &SyncResponse{
+		Success: true,
+		Errors:  []string{},
+	}
+	
+	// 1. Sync customers
+	customersAdded, customersUpdated, err := h.syncCustomers(ctx)
+	if err != nil {
+		h.log.Error("sync customers failed", zap.Error(err))
+		response.Errors = append(response.Errors, fmt.Sprintf("customers: %v", err))
+		response.Success = false
+	}
+	response.CustomersAdded = customersAdded
+	response.CustomersUpdated = customersUpdated
+	
+	// 2. Sync licenses
+	licensesAdded, licensesUpdated, err := h.syncLicenses(ctx)
+	if err != nil {
+		h.log.Error("sync licenses failed", zap.Error(err))
+		response.Errors = append(response.Errors, fmt.Sprintf("licenses: %v", err))
+		response.Success = false
+	}
+	response.LicensesAdded = licensesAdded
+	response.LicensesUpdated = licensesUpdated
+	
+	response.Duration = time.Since(start).String()
+	
+	h.log.Info("baserow sync complete",
+		zap.Int("customers_added", customersAdded),
+		zap.Int("customers_updated", customersUpdated),
+		zap.Int("licenses_added", licensesAdded),
+		zap.Int("licenses_updated", licensesUpdated),
+		zap.String("duration", response.Duration),
+	)
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (h *SyncHandler) syncCustomers(ctx context.Context) (added, updated int, err error) {
+	rows, err := h.baserowClient.ListCustomers(ctx, h.customersTableID)
+	if err != nil {
+		return 0, 0, err
+	}
+	
+	for _, row := range rows {
+		// Générer UUID pour customer (ou utiliser email comme base)
+		customerEmail := row.Clients
+		if customerEmail == "" {
+			continue
+		}
+		
+		// Check if exists
+		var exists bool
+		err := h.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM customers WHERE email = $1)", customerEmail).Scan(&exists)
+		if err != nil {
+			h.log.Error("check customer exists", zap.Error(err))
+			continue
+		}
+		
+		if exists {
+			updated++
+		} else {
+			// Insert new customer
+			_, err = h.db.Exec(ctx, `
+				INSERT INTO customers (id, email, webhook_url, webhook_secret, created_at, updated_at)
+				VALUES (gen_random_uuid(), $1, '', '', NOW(), NOW())
+			`, customerEmail)
+			if err != nil {
+				h.log.Error("insert customer", zap.Error(err), zap.String("email", customerEmail))
+				continue
+			}
+			added++
+		}
+	}
+	
+	return added, updated, nil
+}
+
+func (h *SyncHandler) syncLicenses(ctx context.Context) (added, updated int, err error) {
+	rows, err := h.baserowClient.ListLicenses(ctx, h.licensesTableID)
+	if err != nil {
+		return 0, 0, err
+	}
+	
+	for _, row := range rows {
+		if row.UUID == "" {
+			continue
+		}
+		
+		// Parse expiration date (format DD/MM/YYYY)
+		var expiryAt *time.Time
+		if row.DateLimite != "" {
+			parts := strings.Split(row.DateLimite, "/")
+			if len(parts) == 3 {
+				dateStr := fmt.Sprintf("%s-%s-%s", parts[2], parts[1], parts[0])
+				t, err := time.Parse("2006-01-02", dateStr)
+				if err == nil {
+					expiryAt = &t
+				}
+			}
+		}
+		
+		// Déterminer status
+		status := "revoked"
+		if row.Active {
+			status = "active"
+		}
+		
+		// Générer token HMAC
+		licenseToken := tokens.GenerateLicenseToken(row.UUID, h.tokenSecret)
+		
+		// Plan/tier depuis MCP SERVICES
+		plan := "starter"
+		if strings.Contains(strings.ToLower(row.MCPServices), "master kit") {
+			plan = "pro"
+		}
+		
+		// Check if exists
+		var exists bool
+		err := h.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM licenses WHERE id = $1)", row.UUID).Scan(&exists)
+		if err != nil {
+			h.log.Error("check license exists", zap.Error(err))
+			continue
+		}
+		
+		if exists {
+			// Update
+			_, err = h.db.Exec(ctx, `
+				UPDATE licenses 
+				SET plan = $1, status = $2, expiry_at = $3, license_token = $4, updated_at = NOW()
+				WHERE id = $5
+			`, plan, status, expiryAt, licenseToken, row.UUID)
+			if err != nil {
+				h.log.Error("update license", zap.Error(err), zap.String("uuid", row.UUID))
+				continue
+			}
+			updated++
+		} else {
+			// Insert - besoin de customer_id
+			// On utilise le premier client lié si disponible
+			var customerID *string
+			if len(row.Clients) > 0 {
+				// Récupérer l'email du customer depuis Baserow
+				// Pour l'instant, on utilise le customer de test
+				testCustomerID := "7235841d-d4e1-481f-8560-4399502e1c7e"
+				customerID = &testCustomerID
+			}
+			
+			_, err = h.db.Exec(ctx, `
+				INSERT INTO licenses (id, customer_id, plan, status, expiry_at, license_token, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+			`, row.UUID, customerID, plan, status, expiryAt, licenseToken)
+			if err != nil {
+				h.log.Error("insert license", zap.Error(err), zap.String("uuid", row.UUID))
+				continue
+			}
+			added++
+		}
+	}
+	
+	return added, updated, nil
+}
+
+type WebhookPayload struct {
+	TableID    int                      `json:"table_id"`
+	DatabaseID int                      `json:"database_id"`
+	Event      string                   `json:"event"` // "rows.created", "rows.updated", "rows.deleted"
+	Items      []map[string]interface{} `json:"items"`
+}
+
+// WebhookFromBaserow - endpoint POST /v1/sync/baserow/webhook
+func (h *SyncHandler) WebhookFromBaserow(w http.ResponseWriter, r *http.Request) {
+	var payload WebhookPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		h.log.Error("webhook decode error", zap.Error(err))
+		http.Error(w, "invalid payload", http.StatusBadRequest)
+		return
+	}
+	
+	h.log.Info("baserow webhook received",
+		zap.Int("table_id", payload.TableID),
+		zap.String("event", payload.Event),
+		zap.Int("items", len(payload.Items)),
+	)
+	
+	ctx := r.Context()
+	
+	// Si table LICENCES (648), traiter les licences
+	if payload.TableID == h.licensesTableID {
+		for _, item := range payload.Items {
+			h.processLicenseWebhook(ctx, item, payload.Event)
+		}
+	}
+	
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, "OK")
+}
+
+func (h *SyncHandler) processLicenseWebhook(ctx context.Context, item map[string]interface{}, event string) {
+	uuid, _ := item["UUID"].(string)
+	if uuid == "" {
+		return
+	}
+	
+	active, _ := item["Active"].(bool)
+	status := "revoked"
+	if active {
+		status = "active"
+	}
+	
+	// Générer token
+	licenseToken := tokens.GenerateLicenseToken(uuid, h.tokenSecret)
+	
+	// Update ou insert
+	_, err := h.db.Exec(ctx, `
+		INSERT INTO licenses (id, customer_id, plan, status, license_token, created_at, updated_at)
+		VALUES ($1, $2, 'starter', $3, $4, NOW(), NOW())
+		ON CONFLICT (id) DO UPDATE 
+		SET status = $3, license_token = $4, updated_at = NOW()
+	`, uuid, "7235841d-d4e1-481f-8560-4399502e1c7e", status, licenseToken)
+	
+	if err != nil {
+		h.log.Error("process license webhook", zap.Error(err), zap.String("uuid", uuid))
+	} else {
+		h.log.Info("license webhook processed", zap.String("uuid", uuid), zap.String("status", status))
+	}
+}

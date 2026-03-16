@@ -36,6 +36,15 @@ func NewRouter(
 	hostHandler  := handlers.NewHostHandler(db, ca, cfg.PKI.CertTTLDays, jwtMgr.ActivePublicPEM(), log)
 	tokenHandler := handlers.NewTokenHandler(db, log)
 	pkiHandler   := handlers.NewPKIHandler(db, jwtMgr, version)
+	syncHandler  := handlers.NewSyncHandler(
+		db,
+		cfg.Baserow.URL,
+		cfg.Baserow.Token,
+		cfg.JWT.AdminSecret,
+		cfg.Baserow.LicensesTableID,
+		cfg.Baserow.CustomersTableID,
+		log,
+	)
 
 	adminAuth := middleware.AdminAuth(cfg.JWT.AdminSecret, log)
 
@@ -54,6 +63,7 @@ func NewRouter(
 			r.Post("/licenses/{key}/renew", licHandler.Renew)
 			r.Delete("/hosts/{host_id}", hostHandler.Revoke)
 			r.Get("/tokens/usage/{key}", tokenHandler.Usage)
+			r.Post("/sync/baserow", syncHandler.SyncFromBaserow)
 		})
 
 		// Master
@@ -71,6 +81,9 @@ func NewRouter(
 
 		r.Get("/hosts/{host_id}/cert", hostHandler.RenewCert)
 		r.Post("/hosts/{host_id}/heartbeat", hostHandler.Heartbeat)
+		
+		// Webhook Baserow (public, pas d'auth pour le moment - TODO: ajouter validation signature)
+		r.Post("/sync/baserow/webhook", syncHandler.WebhookFromBaserow)
 	})
 
 	return r

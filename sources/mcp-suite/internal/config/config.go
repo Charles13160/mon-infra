@@ -15,6 +15,7 @@ type Config struct {
 	PKI      PKIConfig
 	Webhook  WebhookConfig
 	Log      LogConfig
+	Baserow  BaserowConfig
 }
 
 type ServerConfig struct {
@@ -51,6 +52,13 @@ type LogConfig struct {
 	Level string `mapstructure:"level"`
 }
 
+type BaserowConfig struct {
+	URL               string `mapstructure:"url"`
+	Token             string `mapstructure:"token"`
+	LicensesTableID   int    `mapstructure:"licenses_table_id"`
+	CustomersTableID  int    `mapstructure:"customers_table_id"`
+}
+
 func Load() (*Config, error) {
 	v := viper.New()
 
@@ -69,6 +77,8 @@ func Load() (*Config, error) {
 	v.SetDefault("webhook.timeout_sec", 10)
 	v.SetDefault("webhook.max_retries", 5)
 	v.SetDefault("log.level", "info")
+	v.SetDefault("baserow.licenses_table_id", 648)
+	v.SetDefault("baserow.customers_table_id", 649)
 
 	// Fichier config YAML (optionnel)
 	v.SetConfigName("config")
@@ -88,6 +98,10 @@ func Load() (*Config, error) {
 	v.BindEnv("jwt.admin_secret", "MCP_JWT_ADMIN_SECRET")
 	v.BindEnv("server.port", "MCP_SERVER_PORT")
 	v.BindEnv("log.level", "MCP_LOG_LEVEL")
+	v.BindEnv("baserow.url", "BASEROW_URL")
+	v.BindEnv("baserow.token", "BASEROW_TOKEN")
+	v.BindEnv("baserow.licenses_table_id", "BASEROW_LICENSES_TABLE_ID")
+	v.BindEnv("baserow.customers_table_id", "BASEROW_CUSTOMERS_TABLE_ID")
 
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
@@ -100,6 +114,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.JWT.AdminSecret == "" {
 		cfg.JWT.AdminSecret = os.Getenv("MCP_JWT_ADMIN_SECRET")
+	}
+	if cfg.Baserow.URL == "" {
+		cfg.Baserow.URL = os.Getenv("BASEROW_URL")
+	}
+	if cfg.Baserow.Token == "" {
+		cfg.Baserow.Token = os.Getenv("BASEROW_TOKEN")
 	}
 
 	if cfg.Database.URL == "" {
