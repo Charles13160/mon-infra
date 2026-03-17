@@ -22,7 +22,20 @@ import (
 var version = "2.0.0"
 
 func main() {
-	log, _ := zap.NewProduction()
+	// Niveau de log configurable via LOG_LEVEL (debug|info|warn|error) — défaut: info
+	var logCfg zap.Config
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		logCfg = zap.NewDevelopmentConfig()
+	} else {
+		logCfg = zap.NewProductionConfig()
+	}
+	switch os.Getenv("LOG_LEVEL") {
+	case "warn":
+		logCfg.Level = zap.NewAtomicLevelAt(zap.WarnLevel)
+	case "error":
+		logCfg.Level = zap.NewAtomicLevelAt(zap.ErrorLevel)
+	}
+	log, _ := logCfg.Build()
 	defer log.Sync()
 
 	// ── Config depuis variables d'environnement ─────────────────
