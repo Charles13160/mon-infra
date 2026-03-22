@@ -1,4 +1,4 @@
-module github.com/felfoldy/mcp-suite
+module github.com/virtusia/mcp-suite
 
 go 1.22
 
@@ -38,4 +38,4 @@ require (
 )
 
 // Module local — ne pas chercher sur GitHub
-replace github.com/felfoldy/mcp-suite => ./
+replace github.com/virtusia/mcp-suite => ./

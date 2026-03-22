@@ -8,7 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/felfoldy/mcp-suite/internal/config"
+	"github.com/virtusia/mcp-suite/internal/config"
 )
 
 func New(ctx context.Context, cfg config.DatabaseConfig, log *zap.Logger) (*pgxpool.Pool, error) {

@@ -9,8 +9,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	mcpjwt "github.com/felfoldy/mcp-suite/internal/jwt"
-	"github.com/felfoldy/mcp-suite/internal/model"
+	mcpjwt "github.com/virtusia/mcp-suite/internal/jwt"
+	"github.com/virtusia/mcp-suite/internal/model"
 )
 
 type contextKey string

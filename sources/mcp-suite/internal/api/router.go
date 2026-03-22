@@ -7,12 +7,12 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/zap"
 
-	"github.com/felfoldy/mcp-suite/internal/api/handlers"
-	"github.com/felfoldy/mcp-suite/internal/api/middleware"
-	"github.com/felfoldy/mcp-suite/internal/config"
-	mcpjwt "github.com/felfoldy/mcp-suite/internal/jwt"
-	"github.com/felfoldy/mcp-suite/internal/pki"
-	"github.com/felfoldy/mcp-suite/internal/webhook"
+	"github.com/virtusia/mcp-suite/internal/api/handlers"
+	"github.com/virtusia/mcp-suite/internal/api/middleware"
+	"github.com/virtusia/mcp-suite/internal/config"
+	mcpjwt "github.com/virtusia/mcp-suite/internal/jwt"
+	"github.com/virtusia/mcp-suite/internal/pki"
+	"github.com/virtusia/mcp-suite/internal/webhook"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

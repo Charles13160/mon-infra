@@ -17,7 +17,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/felfoldy/mcp-suite/internal/api/middleware"
+	"github.com/virtusia/mcp-suite/internal/api/middleware"
 )
 
 var version = "2.0.0"

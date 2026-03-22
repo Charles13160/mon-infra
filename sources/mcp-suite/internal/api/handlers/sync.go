@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/felfoldy/mcp-suite/internal/baserow"
-	"github.com/felfoldy/mcp-suite/internal/tokens"
+	"github.com/virtusia/mcp-suite/internal/baserow"
+	"github.com/virtusia/mcp-suite/internal/tokens"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )

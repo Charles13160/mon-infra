@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/felfoldy/mcp-suite/internal/model"
+	"github.com/virtusia/mcp-suite/internal/model"
 )
 
 type TokenHandler struct {

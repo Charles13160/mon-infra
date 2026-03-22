@@ -13,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.com/felfoldy/mcp-suite/internal/api"
-	"github.com/felfoldy/mcp-suite/internal/config"
-	"github.com/felfoldy/mcp-suite/internal/db"
-	mcpjwt "github.com/felfoldy/mcp-suite/internal/jwt"
-	"github.com/felfoldy/mcp-suite/internal/pki"
-	"github.com/felfoldy/mcp-suite/internal/webhook"
+	"github.com/virtusia/mcp-suite/internal/api"
+	"github.com/virtusia/mcp-suite/internal/config"
+	"github.com/virtusia/mcp-suite/internal/db"
+	mcpjwt "github.com/virtusia/mcp-suite/internal/jwt"
+	"github.com/virtusia/mcp-suite/internal/pki"
+	"github.com/virtusia/mcp-suite/internal/webhook"
 )
 
 var (

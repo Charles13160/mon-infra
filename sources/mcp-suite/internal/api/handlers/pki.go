@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	mcpjwt "github.com/felfoldy/mcp-suite/internal/jwt"
+	mcpjwt "github.com/virtusia/mcp-suite/internal/jwt"
 )
 
 type PKIHandler struct {
