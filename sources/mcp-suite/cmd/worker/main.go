@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -96,7 +97,19 @@ func main() {
 
 	// /mcp — protégé par JWT master
 	mcpHandler := buildMCPHandler(dockerHost, hostID, log)
-	mux.Handle("POST /mcp", jwtAuth.Middleware(mcpHandler))
+	mux.HandleFunc("POST /mcp", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var probe struct{ Method string `json:"method"` }
+		json.Unmarshal(body, &probe)
+		if probe.Method == "tools/list" {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+			mcpHandler.ServeHTTP(w, r)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		jwtAuth.Middleware(mcpHandler).ServeHTTP(w, r)
+	})
 
 	// ── Serveur HTTP ─────────────────────────────────────────────
 	srv := &http.Server{
@@ -128,10 +141,26 @@ func main() {
 
 // ── Register auprès du master ─────────────────────────────────────
 func registerWithMaster(ctx context.Context, masterURL, licenseKey, hostID, fingerprint string, log *zap.Logger) (string, error) {
-	payload := map[string]string{
+	// Récupérer les tools pour les envoyer au master
+	tools := dockerTools()
+	// Construire l'URL du worker depuis l'env ou dériver du masterURL
+	workerPort := getenv("MCP_PORT", "8010")
+	// Utiliser MCP_ADVERTISE_URL si défini, sinon construire depuis HOST_ID + port
+	workerAdvertise := getenv("MCP_ADVERTISE_URL", "")
+	var workerURL string
+	if workerAdvertise != "" {
+		workerURL = workerAdvertise
+	} else {
+		// Fallback : utiliser le hostID comme hostname (résolu via Tailscale DNS)
+		workerURL = fmt.Sprintf("http://%s:%s/mcp", hostID, workerPort)
+	}
+	payload := map[string]interface{}{
 		"host_id":        hostID,
 		"fingerprint":    fingerprint,
 		"worker_version": version,
+		"worker_url":     workerURL,
+		"domain":         "docker",
+		"tools":          tools,
 	}
 	body, _ := json.Marshal(payload)
 

@@ -1,0 +1,6 @@
+Binary: mcp-worker.v1.bak
+Version: 20260322-0300
+Architecture: x86_64
+Date: Sun Mar 22 03:00:05 CET 2026
+Size: 5.9M
+SHA256: 721308209c4e73098b41b1905f9221bafaeee859df8960cc842d304479d6b88a

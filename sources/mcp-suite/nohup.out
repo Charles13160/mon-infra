@@ -1,0 +1,2 @@
+{"level":"info","ts":1774107885.952147,"caller":"license-server/main.go:33","msg":"MCP License Server démarrage","version":"1.0.0"}
+{"level":"fatal","ts":1774107885.9548388,"caller":"license-server/main.go:37","msg":"chargement config","error":"MCP_DATABASE_URL est requis","stacktrace":"main.main\n\t/srv/mcp-suite/cmd/license-server/main.go:37\nruntime.main\n\t/usr/lib/go-1.19/src/runtime/proc.go:250"}
