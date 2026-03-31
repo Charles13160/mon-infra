@@ -196,8 +196,19 @@ func (h *SyncHandler) syncLicenses(ctx context.Context) (added, updated int, err
 			}
 			updated++
 		} else {
-			customerID := "7235841d-d4e1-481f-8560-4399502e1c7e"
-			jwtKid := fmt.Sprintf("sync-%s", row.UUID[:8])
+			// Résoudre customer_id depuis l'email du client Baserow
+			clientEmail := ""
+			if len(row.Clients) > 0 {
+				clientEmail = row.Clients[0].Value
+			}
+			customerID, err := h.getOrCreateCustomerID(ctx, clientEmail)
+			if err != nil {
+				h.log.Error("resolve customer_id", zap.Error(err), zap.String("uuid", row.UUID))
+				continue
+			}
+			uuidPrefix := row.UUID
+			if len(uuidPrefix) > 8 { uuidPrefix = uuidPrefix[:8] }
+			jwtKid := fmt.Sprintf("sync-%s", uuidPrefix)
 
 			_, err = h.db.Exec(ctx, `
 				INSERT INTO licenses (license_key, customer_id, plan, status, expiry_at, license_token, billing_cycle, jwt_kid, created_at, updated_at)
@@ -273,15 +284,30 @@ func (h *SyncHandler) processLicenseWebhook(ctx context.Context, item map[string
 	}
 
 	licenseToken := tokens.GenerateLicenseToken(uuid, h.tokenSecret)
-	jwtKid := fmt.Sprintf("sync-%s", uuid[:8])
+	uuidPrefix := uuid
+	if len(uuidPrefix) > 8 { uuidPrefix = uuidPrefix[:8] }
+	jwtKid := fmt.Sprintf("sync-%s", uuidPrefix)
 
 	// UPSERT avec expiry_at
+	// Résoudre customer_id depuis le payload webhook (champ CLIENTS)
+	clientEmail := ""
+	if clients, ok := item["CLIENTS"].([]interface{}); ok && len(clients) > 0 {
+		if c, ok := clients[0].(map[string]interface{}); ok {
+			clientEmail, _ = c["value"].(string)
+		}
+	}
+	customerID, custErr := h.getOrCreateCustomerID(ctx, clientEmail)
+	if custErr != nil {
+		// Fallback : récupérer le customer_id existant en DB
+		h.db.QueryRow(ctx, "SELECT customer_id FROM licenses WHERE license_key = $1", uuid).Scan(&customerID)
+	}
+
 	_, err := h.db.Exec(ctx, `
 		INSERT INTO licenses (license_key, customer_id, plan, status, expiry_at, license_token, billing_cycle, jwt_kid, created_at, updated_at)
 		VALUES ($1, $2, 'starter', $3, $4, $5, 'monthly', $6, NOW(), NOW())
 		ON CONFLICT (license_key) DO UPDATE
 		SET status = $3, expiry_at = COALESCE($4, licenses.expiry_at), license_token = $5, updated_at = NOW()
-	`, uuid, "7235841d-d4e1-481f-8560-4399502e1c7e", status, expiryAt, licenseToken, jwtKid)
+	`, uuid, customerID, status, expiryAt, licenseToken, jwtKid)
 
 	if err != nil {
 		h.log.Error("process license webhook", zap.Error(err), zap.String("uuid", uuid))
@@ -354,4 +380,29 @@ func (h *SyncHandler) notifyMasterCacheInvalidation(licenseKey, status string) {
 			zap.String("license_key", licenseKey[:8]+"..."),
 		)
 	}
+}
+
+// getOrCreateCustomerID résout le customer_id depuis un email.
+// Crée le customer s'il n'existe pas encore.
+func (h *SyncHandler) getOrCreateCustomerID(ctx context.Context, email string) (string, error) {
+	if email == "" {
+		return "", fmt.Errorf("email vide")
+	}
+	var customerID string
+	err := h.db.QueryRow(ctx,
+		"SELECT id FROM customers WHERE email = $1", email,
+	).Scan(&customerID)
+	if err == nil {
+		return customerID, nil
+	}
+	err = h.db.QueryRow(ctx, `
+		INSERT INTO customers (id, email, webhook_url, webhook_secret, created_at, updated_at)
+		VALUES (gen_random_uuid()::text, $1, '', '', NOW(), NOW())
+		RETURNING id
+	`, email).Scan(&customerID)
+	if err != nil {
+		return "", fmt.Errorf("insert customer %s: %w", email, err)
+	}
+	h.log.Info("customer auto-créé depuis sync", zap.String("email", email), zap.String("id", customerID))
+	return customerID, nil
 }

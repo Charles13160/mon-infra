@@ -312,11 +312,19 @@ func buildMCPHandler(dockerHost, hostID string, log *zap.Logger) http.Handler {
 				writeRPCError(w, req.ID, -32602, "invalid params")
 				return
 			}
+			// tokens_in = taille du payload (action + arguments)
+			paramsBytes, _ := json.Marshal(params.Arguments)
+			tokensIn := len(params.Name) + len(paramsBytes)
+
 			result, err := executeDockerTool(r.Context(), dockerClient, dockerHost, params.Name, params.Arguments, log)
 			if err != nil {
 				writeRPCError(w, req.ID, -32000, err.Error())
 				return
 			}
+
+			// tokens_out = taille de la réponse
+			tokensOut := len(result)
+
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
@@ -324,6 +332,8 @@ func buildMCPHandler(dockerHost, hostID string, log *zap.Logger) http.Handler {
 					"content": []map[string]string{
 						{"type": "text", "text": result},
 					},
+					"tokens_in":  tokensIn,
+					"tokens_out": tokensOut,
 				},
 			})
 
